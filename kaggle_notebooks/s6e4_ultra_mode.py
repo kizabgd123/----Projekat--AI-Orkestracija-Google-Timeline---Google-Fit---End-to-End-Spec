@@ -23,13 +23,16 @@ except Exception:
 
 try:
     import xgboost as xgb
+    HAS_XGB = True
 except Exception:
-    raise ImportError('xgboost is required')
+    xgb = None
+    HAS_XGB = False
 
 try:
     from catboost import CatBoostClassifier
 except Exception:
     raise ImportError('catboost is required')
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 
 TARGET = 'Irrigation_Need'
@@ -194,6 +197,9 @@ def cv_lgbm(X, y, X_test, sample_weight=None, n_splits=5):
 
 
 def cv_xgb(X, y, X_test, sample_weight=None, n_splits=5):
+    if not HAS_XGB:
+        print('xgboost is unavailable; using HistGradientBoosting fallback')
+        return cv_hgb(X, y, X_test, sample_weight=sample_weight, n_splits=n_splits)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
     oof = np.zeros((len(X), 3), dtype=np.float32)
     tst = np.zeros((len(X_test), 3), dtype=np.float32)
@@ -236,6 +242,32 @@ def cv_xgb(X, y, X_test, sample_weight=None, n_splits=5):
         sc = balanced_accuracy_score(y[va], pv.argmax(axis=1))
         scores.append(sc)
         print(f'XGB  fold {fold}: {sc:.6f}')
+        del model, sw, pv, pt
+        gc.collect()
+    return oof, tst, scores
+
+
+def cv_hgb(X, y, X_test, sample_weight=None, n_splits=5):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+    oof = np.zeros((len(X), 3), dtype=np.float32)
+    tst = np.zeros((len(X_test), 3), dtype=np.float32)
+    scores = []
+    for fold, (tr, va) in enumerate(skf.split(X, y), 1):
+        model = HistGradientBoostingClassifier(
+            learning_rate=0.05,
+            max_depth=8,
+            max_iter=500,
+            random_state=SEED + fold
+        )
+        sw = sample_weight[tr] if sample_weight is not None else compute_sample_weight(class_weight='balanced', y=y[tr])
+        model.fit(X.iloc[tr], y[tr], sample_weight=sw)
+        pv = model.predict_proba(X.iloc[va])
+        pt = model.predict_proba(X_test)
+        oof[va] = pv
+        tst += pt / n_splits
+        sc = balanced_accuracy_score(y[va], pv.argmax(axis=1))
+        scores.append(sc)
+        print(f'HGB  fold {fold}: {sc:.6f}')
         del model, sw, pv, pt
         gc.collect()
     return oof, tst, scores
